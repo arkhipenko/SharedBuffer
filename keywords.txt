@@ -1,0 +1,62 @@
+#######################################
+# Syntax Coloring Map For SharedBuffer
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+SharedBuffer	KEYWORD1
+Handle	KEYWORD1
+Status	KEYWORD1
+LineWriter	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+registerBuffer	KEYWORD2
+begin	KEYWORD2
+end	KEYWORD2
+acquire	KEYWORD2
+release	KEYWORD2
+pointer	KEYWORD2
+isHeld	KEYWORD2
+size	KEYWORD2
+name	KEYWORD2
+count	KEYWORD2
+started	KEYWORD2
+poolSize	KEYWORD2
+requiredSize	KEYWORD2
+freeBytes	KEYWORD2
+largestFree	KEYWORD2
+dump	KEYWORD2
+statusText	KEYWORD2
+
+#######################################
+# Instances (KEYWORD2)
+#######################################
+
+SharedBuf	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+SB_OK	LITERAL1
+SB_ERR_ARGUMENT	LITERAL1
+SB_ERR_DUPLICATE	LITERAL1
+SB_ERR_FULL	LITERAL1
+SB_ERR_TOO_LARGE	LITERAL1
+SB_ERR_NO_MEMORY	LITERAL1
+SB_ERR_NOT_STARTED	LITERAL1
+SB_ERR_STARTED	LITERAL1
+SB_ERR_HELD	LITERAL1
+SB_ERR_NOT_HELD	LITERAL1
+SB_ERR_NO_SPACE	LITERAL1
+SHARED_BUFFER_MAX_BUFFERS	LITERAL1
+SHARED_BUFFER_ALIGN	LITERAL1
+SHARED_BUFFER_VERSION	LITERAL1
+SHARED_BUFFER_VERSION_STRING	LITERAL1
+SHARED_BUFFER_CRITICAL_ENTER	LITERAL1
+SHARED_BUFFER_CRITICAL_EXIT	LITERAL1

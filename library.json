@@ -1,0 +1,35 @@
+{
+  "name": "SharedBuffer",
+  "keywords": "memory, buffer, pool, shared, allocation, mcu, ram",
+  "description": "One memory pool, allocated once, shared by registered buffers that are not used at the same time. Buffers are placed in free gaps on acquire and held until release.",
+  "repository":
+  {
+    "type": "git",
+    "url": "https://github.com/arkhipenko/SharedBuffer.git"
+  },
+  "authors":
+  [
+    {
+      "name": "Anatoli Arkhipenko",
+      "email": "arkhipenko@hotmail.com",
+      "url": "https://github.com/arkhipenko",
+      "maintainer": true
+    }
+  ],
+  "version": "1.0.0",
+  "license": "BSD-3-Clause",
+  "headers": "SharedBuffer.h",
+  "frameworks": "*",
+  "platforms": "*",
+  "export": {
+    "include": [
+      "src",
+      "examples",
+      "library.json",
+      "library.properties",
+      "keywords.txt",
+      "LICENSE.txt",
+      "README.md"
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+# Claude Code and Design Central
+.claude/
+.dc/
+.mcp.json
+CLAUDE.md
+CLAUDE.local.md
+claude-start
+
+# Folders starting with an underscore (host test builds, review scratch)
+_*/
+
+# PlatformIO
+.pio/
