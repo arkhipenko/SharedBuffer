@@ -53,8 +53,8 @@ void setup() {
   printValue("pointer(log) matches", pool.pointer(log) == l); // 1
 
   report("end while held", pool.end());                       // held
-  pool.release(frame);
-  pool.release(log);
+  report("release frame", pool.release(frame));               // ok
+  report("release log", pool.release(log));                   // ok
   printValue("frame is held", pool.isHeld(frame));            // 0
   report("end", pool.end());                                  // ok: registrations stay
   printValue("registered buffers", pool.count());             // 2

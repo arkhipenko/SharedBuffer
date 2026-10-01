@@ -12,10 +12,18 @@
 
 #if defined(SHARED_BUFFER_CRITICAL_ENTER) && defined(SHARED_BUFFER_CRITICAL_EXIT)
 
+// The compiler barriers keep table accesses between ENTER and EXIT. The macros
+// themselves must provide the hardware side (interrupts off, lock, memory ordering).
+#if defined(__GNUC__)
+#define SHARED_BUFFER_COMPILER_BARRIER()    __asm__ __volatile__ ("" ::: "memory")
+#else
+#define SHARED_BUFFER_COMPILER_BARRIER()
+#endif
+
 namespace {
 struct Critical {
-    Critical()  { SHARED_BUFFER_CRITICAL_ENTER(); }
-    ~Critical() { SHARED_BUFFER_CRITICAL_EXIT(); }
+    Critical()  { SHARED_BUFFER_CRITICAL_ENTER(); SHARED_BUFFER_COMPILER_BARRIER(); }
+    ~Critical() { SHARED_BUFFER_COMPILER_BARRIER(); SHARED_BUFFER_CRITICAL_EXIT(); }
 };
 }
 
@@ -40,14 +48,15 @@ struct Critical {
 namespace {
 struct Critical {
     uint8_t sreg;
-    Critical() : sreg(SREG) { cli(); }
-    ~Critical() { SREG = sreg; __asm__ __volatile__ ("" ::: "memory"); }
+    Critical() : sreg(SREG) { cli(); }                                  // cli() is a compiler barrier
+    ~Critical() { __asm__ __volatile__ ("" ::: "memory"); SREG = sreg; }   // barrier first: table stores stay inside
 };
 }
 
-#elif defined(ARDUINO_ARCH_RP2040)
+#elif defined(ARDUINO_ARCH_RP2040) || defined(ARDUINO_ARCH_MBED_RP2040) || defined(PICO_RP2040) || defined(PICO_RP2350)
 
-#error "SharedBuffer: RP2040 has two cores. Define SHARED_BUFFER_CRITICAL_ENTER() and SHARED_BUFFER_CRITICAL_EXIT() in the build."
+// Interrupts off on one core does not keep the other core out
+#error "SharedBuffer: RP2040 and RP2350 have two cores. Define SHARED_BUFFER_CRITICAL_ENTER() and SHARED_BUFFER_CRITICAL_EXIT() in the build."
 
 #elif defined(__ARM_ARCH_6M__) || defined(__ARM_ARCH_7M__) || defined(__ARM_ARCH_7EM__) || \
       defined(__ARM_ARCH_8M_BASE__) || defined(__ARM_ARCH_8M_MAIN__) || defined(__ARM_ARCH_8_1M_MAIN__)

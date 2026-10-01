@@ -2,7 +2,8 @@
 //
 // "rx" needs 256 bytes and "work" needs 512. The pool is the largest of them,
 // 512 bytes. While "rx" is held, "work" does not fit and acquire() fails with
-// "no space". After "rx" is released, "work" gets the whole pool.
+// "no space". After "rx" is released, "work" gets the whole pool. At the end the
+// pool is made again with room for both buffers at once.
 
 #include <SharedBuffer.h>
 
@@ -28,6 +29,12 @@ void setup() {
   report("register rx", rxBuffer);
   report("register work", workBuffer);
   if ( rxBuffer < 0 || workBuffer < 0 ) return;
+  for ( SharedBuffer::Handle h = 0; h < (SharedBuffer::Handle) SharedBuf.count(); h++ ) {
+    Serial.print("  ");
+    Serial.print(SharedBuf.name(h));                         // rx, work
+    Serial.print(" ");
+    Serial.println((unsigned long) SharedBuf.size(h));       // 256, 512
+  }
 
   // 2. Allocate the pool once: the largest registration, 512 bytes
   SharedBuffer::Status status = SharedBuf.begin();
@@ -59,6 +66,21 @@ void setup() {
   Serial.println((unsigned long) work[511]);                 // 255
   report("release work", SharedBuf.release(workBuffer));     // ok
   report("release work again", SharedBuf.release(workBuffer));  // not held
+
+  // 5. Both buffers at the same time need a pool of 256 + 512 bytes.
+  //    end() frees the pool; the registrations stay.
+  report("end", SharedBuf.end());                            // ok
+  Serial.print("started: ");
+  Serial.println((unsigned long) SharedBuf.started());       // 0
+  report("begin(768)", SharedBuf.begin(768));                // ok
+  rx   = (uint8_t*) SharedBuf.acquire(rxBuffer, &status);
+  report("acquire rx", status);                              // ok
+  work = (uint8_t*) SharedBuf.acquire(workBuffer, &status);
+  report("acquire work while rx is held", status);           // ok
+  Serial.print("free bytes: ");
+  Serial.println((unsigned long) SharedBuf.freeBytes());     // 0
+  report("release rx", SharedBuf.release(rxBuffer));         // ok
+  report("release work", SharedBuf.release(workBuffer));     // ok
 }
 
 void loop() {

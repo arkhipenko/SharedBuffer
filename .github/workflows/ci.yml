@@ -1,9 +1,11 @@
 # Continuous integration for SharedBuffer
 # - host unit tests (tests/host/Makefile) with gcc and clang in three language
 #   standards: AddressSanitizer, UndefinedBehaviorSanitizer, ThreadSanitizer
-# - example sketches compiled with Arduino CLI for AVR, SAMD and ESP32
+# - example sketches compiled with Arduino CLI for AVR, megaAVR, SAMD and ESP32
 #   (Xtensa and RISC-V, latest core and core 2.0.17)
-# - example sketches compiled with PlatformIO for nRF52840 on the n-able core
+# - example sketches compiled with PlatformIO for AVR, SAMD, ESP32, ESP32-C3 and
+#   nRF52840 (n-able core) with -Wall -Wextra; a warning in SharedBuffer.h,
+#   SharedBuffer.cpp or an example fails the job (core warnings do not)
 # - Arduino Lint
 
 name: CI
@@ -40,6 +42,10 @@ jobs:
             fqbn: arduino:avr:uno
             platforms: |
               - name: arduino:avr
+          - name: Nano Every
+            fqbn: arduino:megaavr:nona4809
+            platforms: |
+              - name: arduino:megaavr
           - name: MKR Zero
             fqbn: arduino:samd:mkrzero
             platforms: |
@@ -74,27 +80,49 @@ jobs:
             - --warnings
             - all
 
-  examples-nrf52:
-    name: Examples (nRF52840, n-able core)
+  examples-pio:
+    name: Examples, no warnings (${{ matrix.board }})
     runs-on: ubuntu-latest
-    env:
-      PLATFORM: https://github.com/h2zero/platform-n-able.git#1.2.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - board: uno
+            platform: atmelavr
+          - board: mkrzero
+            platform: atmelsam
+          - board: esp32dev
+            platform: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
+          - board: esp32-c3-devkitm-1
+            platform: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.39/platform-espressif32.zip
+          - board: generic_nrf52840
+            platform: https://github.com/h2zero/platform-n-able.git#1.2.0
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"
-      - name: Install PlatformIO and the n-able platform
+      - name: Install PlatformIO and the platform
         run: |
           pip install platformio
-          pio pkg install --global --platform "$PLATFORM"
-      - name: Compile examples
+          pio pkg install --global --platform "${{ matrix.platform }}"
+      - name: Compile examples, fail on warnings in library or example code
         run: |
+          set +e
+          status=0
           for sketch in examples/*/*.ino; do
             echo "== $sketch"
-            pio ci "$sketch" --lib . --board generic_nrf52840 --project-option "platform=$PLATFORM" \
-              --project-option "build_flags=-Wall -Wextra"
+            pio ci "$sketch" --lib . --board "${{ matrix.board }}" \
+              --project-option "platform=${{ matrix.platform }}" \
+              --project-option "build_flags=-Wall -Wextra" > build.log 2>&1
+            result=$?
+            cat build.log
+            if [ $result -ne 0 ]; then echo "::error::build failed: $sketch"; status=1; fi
+            if grep -E "(SharedBuffer\.(h|cpp)|\.ino(\.cpp)?):[0-9]+:[0-9]+: warning:" build.log; then
+              echo "::error::warning in library or example code: $sketch"; status=1
+            fi
           done
+          exit $status
 
   lint:
     runs-on: ubuntu-latest

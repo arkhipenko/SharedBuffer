@@ -53,10 +53,10 @@ class SharedBuffer {
         /** @brief Result codes. Errors are negative, so they fit in a Handle. */
         enum Status : int8_t {
             SB_OK               =   0,  ///< Success
-            SB_ERR_ARGUMENT     =  -1,  ///< NULL or empty name, size 0, unknown handle, NULL storage, nothing to size the pool by
+            SB_ERR_ARGUMENT     =  -1,  ///< NULL or empty name, size 0, unknown handle, NULL storage or less than one alignment unit of it, nothing to size the pool by
             SB_ERR_DUPLICATE    =  -2,  ///< A buffer with this name is already registered
             SB_ERR_FULL         =  -3,  ///< SHARED_BUFFER_MAX_BUFFERS buffers are already registered
-            SB_ERR_TOO_LARGE    =  -4,  ///< Size cannot be rounded, larger than the pool, or storage too small
+            SB_ERR_TOO_LARGE    =  -4,  ///< Size cannot be rounded, larger than the pool, or a registered buffer does not fit the storage
             SB_ERR_NO_MEMORY    =  -5,  ///< malloc() failed in begin()
             SB_ERR_NOT_STARTED  =  -6,  ///< The pool does not exist yet (begin() not called)
             SB_ERR_STARTED      =  -7,  ///< begin() was already called
@@ -77,6 +77,11 @@ class SharedBuffer {
         constexpr SharedBuffer()
             : m_entries{}, m_order{}, m_pool(NULL), m_raw(NULL), m_poolSize(0),
               m_largest(0), m_count(0), m_heldCount(0) {}
+
+        // Not copyable: a copy would share the pool, hand out the same bytes twice,
+        // and free it twice in end(). Pass a reference or a pointer instead.
+        SharedBuffer(const SharedBuffer&) = delete;
+        SharedBuffer& operator=(const SharedBuffer&) = delete;
 
         /**
          * @brief Register a buffer for later use
@@ -105,8 +110,9 @@ class SharedBuffer {
          *        Declare it alignas(SHARED_BUFFER_ALIGN), or up to SHARED_BUFFER_ALIGN - 1
          *        bytes at its start are skipped.
          * @param storageSize Size of storage, bytes. All of it (after alignment) becomes the pool.
-         * @return SB_OK, SB_ERR_STARTED, SB_ERR_ARGUMENT, SB_ERR_TOO_LARGE (a registered
-         *         buffer does not fit)
+         * @return SB_OK, SB_ERR_STARTED, SB_ERR_ARGUMENT (NULL storage, or less than
+         *         SHARED_BUFFER_ALIGN bytes left after alignment), SB_ERR_TOO_LARGE (a
+         *         registered buffer does not fit)
          */
         Status begin(void* storage, size_t storageSize);
 

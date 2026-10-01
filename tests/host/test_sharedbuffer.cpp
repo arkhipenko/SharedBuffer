@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <string>
 #include <vector>
+#include <type_traits>
 #if !defined(TEST_COUNTED_CRITICAL)
 #include <atomic>
 #include <thread>
@@ -16,6 +17,8 @@
 typedef SharedBuffer SB;
 
 static_assert(SHARED_BUFFER_MAX_BUFFERS >= 8, "the tests register up to 8 buffers in one object");
+static_assert(!std::is_copy_constructible<SharedBuffer>::value, "a copy would share the pool (D1)");
+static_assert(!std::is_copy_assignable<SharedBuffer>::value, "a copy would share the pool (D1)");
 
 static const size_t A = SHARED_BUFFER_ALIGN;
 static const size_t SIZE_MAX_ = (size_t) -1;
@@ -54,7 +57,21 @@ static int  g_nested = 0;   // number of enters while already inside
 static long g_enters = 0;
 static long g_exits  = 0;
 
-void sb_test_enter() { if ( g_depth != 0 ) g_nested++; g_depth++; g_enters++; }
+// g_inject runs once, just before critical section number g_injectAt starts. It plays
+// another task that runs between two critical sections of the call under test.
+static void (*g_inject)() = NULL;
+static long g_injectAt = -1;
+
+void sb_test_enter() {
+    if ( g_injectAt >= 0 && g_enters == g_injectAt ) {
+        void (*f)() = g_inject;
+        g_injectAt = -1;
+        f();
+    }
+    if ( g_depth != 0 ) g_nested++;
+    g_depth++;
+    g_enters++;
+}
 void sb_test_exit()  { g_depth--; g_exits++; }
 #endif
 
@@ -599,12 +616,14 @@ static void test_random() {
 }
 
 // ---------------------------------------------------------------------------------------
-// Tasks: several threads acquire, fill, verify and release their own buffers.
-// Run under TSan by the "tsan" variant. Not run in the "counted" variant (no real lock).
+// Tasks: three threads acquire, fill, verify and release their own buffers and one
+// shared buffer they compete for. A fourth thread reads every query and registers a
+// buffer while the others run. Run under TSan by the "tsan" variant. Not run in the
+// "counted" variant (no real lock).
 
 #if !defined(TEST_COUNTED_CRITICAL)
 static void test_threads() {
-    const int T = 4;
+    const int T = 3;
     const int PER = 2;
     SB sb;
     static char names[T * PER][16];
@@ -612,29 +631,40 @@ static void test_threads() {
         snprintf(names[i], sizeof(names[i]), "t%d", i);
         CHECK_EQ(sb.registerBuffer(names[i], (size_t) (100 + 90 * i)), i);
     }
+    const SB::Handle shared = sb.registerBuffer("shared", 300);
+    CHECK_EQ(shared, T * PER);
     CHECK_EQ(sb.begin(1500), SB::SB_OK);                   // less than the sum: requests collide
 
-    std::atomic<long> ok(0), busy(0), corrupt(0);
+    std::atomic<long> ok(0), busy(0), corrupt(0), sharedOk(0);
+    std::atomic<int> lateHandle(-100);
     std::atomic<bool> stop(false);
     std::vector<std::thread> threads;
     for ( int t = 0; t < T; t++ ) {
         threads.push_back(std::thread([&, t]() {
             for ( int n = 0; n < 20000; n++ ) {
-                SB::Handle h = (SB::Handle) (t * PER + n % PER);
+                SB::Handle h = ( n % 3 == 2 ) ? shared : (SB::Handle) (t * PER + n % PER);
                 size_t len = sb.size(h);
                 uint8_t* p = (uint8_t*) sb.acquire(h);
                 if ( p == NULL ) { busy++; continue; }
+                if ( sb.pointer(h) != p || !sb.isHeld(h) ) corrupt++;
                 memset(p, 0x10 + t, len);
                 for ( size_t i = 0; i < len; i++ ) if ( p[i] != 0x10 + t ) { corrupt++; break; }
                 if ( sb.release(h) != SB::SB_OK ) corrupt++;
                 ok++;
+                if ( h == shared ) sharedOk++;
             }
         }));
     }
     std::thread reader([&]() {
+        long n = 0;
         while ( !stop ) {
             if ( sb.freeBytes() > sb.poolSize() ) corrupt++;
             if ( sb.largestFree() > sb.poolSize() ) corrupt++;
+            (void) sb.pointer(shared);
+            (void) sb.isHeld(shared);
+            if ( sb.size(shared) != 300 || sb.name(shared) == NULL ) corrupt++;
+            if ( sb.count() < T * PER + 1 ) corrupt++;
+            if ( ++n == 1000 ) lateHandle = sb.registerBuffer("late", 50);   // while the others run
         }
     });
     for ( size_t i = 0; i < threads.size(); i++ ) threads[i].join();
@@ -643,9 +673,80 @@ static void test_threads() {
 
     CHECK_EQ(corrupt.load(), 0);
     CHECK(ok.load() > 0);
-    printf("   threads: %ld acquired, %ld no space\n", ok.load(), busy.load());
+    CHECK(sharedOk.load() > 0);
+    CHECK_EQ(lateHandle.load(), T * PER + 1);
+    printf("   threads: %ld acquired (%ld of the shared buffer), %ld refused\n",
+           ok.load(), sharedOk.load(), busy.load());
     CHECK_EQ(sb.freeBytes(), sb.poolSize());
     CHECK_EQ(sb.end(), SB::SB_OK);
+}
+#endif
+
+// ---------------------------------------------------------------------------------------
+// Counted variant only: critical sections per call, and begin() racing another task
+
+#if defined(TEST_COUNTED_CRITICAL)
+#define ENTERS(expr, n) do { long e0_ = g_enters; (void) (expr); CHECK_EQ(g_enters - e0_, n); } while (0)
+
+// Every call that touches the table enters exactly the expected number of sections
+static void test_lock_per_call() {
+    alignas(64) static uint8_t storage[128];
+    SB sb;
+    ENTERS(sb.registerBuffer("a", 64), 1);
+    ENTERS(sb.begin(), 2);                                  // before and after malloc()
+    ENTERS(sb.acquire(0), 1);
+    ENTERS(sb.pointer(0), 1);
+    ENTERS(sb.isHeld(0), 1);
+    ENTERS(sb.size(0), 1);
+    ENTERS(sb.name(0), 1);
+    ENTERS(sb.count(), 1);
+    ENTERS(sb.started(), 1);
+    ENTERS(sb.poolSize(), 1);
+    ENTERS(sb.requiredSize(), 1);
+    ENTERS(sb.freeBytes(), 1);
+    ENTERS(sb.largestFree(), 1);
+    g_lines.clear();
+    ENTERS(sb.dump(collectLine), 2);                        // the header, then one per buffer
+    ENTERS(sb.release(0), 1);
+    ENTERS(sb.end(), 1);
+    ENTERS(sb.begin(storage, sizeof(storage)), 1);
+    ENTERS(sb.end(), 1);
+    ENTERS(SB::statusText(SB::SB_ERR_HELD), 0);
+}
+
+static SB*        g_raceTarget = NULL;
+static int        g_raceResult = -100;
+alignas(64) static uint8_t g_raceStorage[4096];
+
+static void raceRegisterLarger() { g_raceResult = g_raceTarget->registerBuffer("big", 4000); }
+static void raceBeginStorage()   { g_raceResult = g_raceTarget->begin(g_raceStorage, sizeof(g_raceStorage)); }
+
+// Another task acts between the two critical sections of begin(size_t)
+static void test_begin_race() {
+    SB sb;
+    g_raceTarget = &sb;
+    CHECK_EQ(sb.registerBuffer("a", 100), 0);
+
+    // A larger registration arrives while begin() is in malloc(): the pool would be too small
+    g_inject = raceRegisterLarger;
+    g_injectAt = g_enters + 1;
+    CHECK_EQ(sb.begin(), SB::SB_ERR_TOO_LARGE);
+    CHECK_EQ(g_raceResult, 1);
+    CHECK(!sb.started());                                   // and the block was freed (LeakSanitizer)
+    CHECK_EQ(sb.begin(), SB::SB_OK);                        // a retry sizes the pool for "big"
+    CHECK_EQ(sb.poolSize(), al(4000));
+    CHECK_EQ(sb.end(), SB::SB_OK);
+
+    // Another begin() wins while this one is in malloc()
+    g_inject = raceBeginStorage;
+    g_injectAt = g_enters + 1;
+    CHECK_EQ(sb.begin(), SB::SB_ERR_STARTED);
+    CHECK_EQ(g_raceResult, SB::SB_OK);
+    CHECK_EQ(sb.poolSize(), sizeof(g_raceStorage));        // the winner's pool stays
+    CHECK(sb.acquire(1) == g_raceStorage);
+    CHECK_EQ(sb.release(1), SB::SB_OK);
+    CHECK_EQ(sb.end(), SB::SB_OK);
+    g_inject = NULL;
 }
 #endif
 
@@ -681,6 +782,8 @@ int main() {
     test_status_text();
     test_random();
 #if defined(TEST_COUNTED_CRITICAL)
+    test_lock_per_call();
+    test_begin_race();
     CHECK(g_enters > 0);
     CHECK_EQ(g_enters, g_exits);
     CHECK_EQ(g_depth, 0);

@@ -61,7 +61,7 @@ bool startDfu() {
   }
   if ( SharedBuf.acquire(dfuBufferB, &status) == NULL ) {
     report("start DFU, buffer B", status);
-    SharedBuf.release(dfuBufferA);       // do not keep half of the memory
+    report("give back DFU buffer A", SharedBuf.release(dfuBufferA));   // do not keep half of the memory
     return false;
   }
   report("start DFU", status);
@@ -69,8 +69,8 @@ bool startDfu() {
 }
 
 void stopDfu() {
-  SharedBuf.release(dfuBufferA);
-  report("stop DFU", SharedBuf.release(dfuBufferB));
+  report("stop DFU, buffer A", SharedBuf.release(dfuBufferA));
+  report("stop DFU, buffer B", SharedBuf.release(dfuBufferB));
 }
 
 // ---------------------------------------------------------------------------------
@@ -108,7 +108,7 @@ void setup() {
     Serial.println(" bytes after buffer A");                   // 4096 (AVR: 256)
     SharedBuf.dump(printLine);
     startCalculation();                  // no space
-    stopDfu();                           // ok
+    stopDfu();                           // ok, ok
   }
 
   // Back to normal operation

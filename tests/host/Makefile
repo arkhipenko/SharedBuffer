@@ -12,8 +12,9 @@
 # Every variant links early_user.cpp before SharedBuffer.cpp: a global constructor that
 # registers a buffer in SharedBuf during static initialization.
 # Also checked: bad SHARED_BUFFER_MAX_BUFFERS and SHARED_BUFFER_ALIGN stop the build,
-# SharedBuffer.cpp emits no global constructor, and the version agrees in the header,
-# library.json, library.properties and README.md.
+# RP2040 and RP2350 builds stop without the override macros, SharedBuffer.cpp emits no
+# global constructor, and the version agrees in the header, library.json,
+# library.properties and README.md.
 
 STD  ?= gnu++11
 OUT  = _build
@@ -33,7 +34,7 @@ BINS = $(OUT)/default $(OUT)/align1 $(OUT)/align32 $(OUT)/counted $(OUT)/o2
 export ASAN_OPTIONS = allocator_may_return_null=1
 export TSAN_OPTIONS = allocator_may_return_null=1
 
-test: version config_check static_init_check $(BINS) $(OUT)/tsan
+test: version config_check platform_check static_init_check $(BINS) $(OUT)/tsan
 	@for t in $(BINS); do echo "== $$t ($(CXX), $(STD))"; ./$$t || exit 1; done
 	@echo "== $(OUT)/tsan ($(CXX), $(STD))"
 	@setarch $$(uname -m) -R ./$(OUT)/tsan   # ASLR off: TSan fails on some kernels' mmap layouts
@@ -66,6 +67,15 @@ config_check:
 	         echo "FAIL config: $$d was accepted"; exit 1; fi; done
 	@echo "== config (bad SHARED_BUFFER_MAX_BUFFERS and SHARED_BUFFER_ALIGN stop the build)"
 
+# Two-core RP2040 and RP2350 builds must stop unless the build supplies its own lock
+platform_check:
+	@for d in "PICO_RP2040=1" "PICO_RP2350=1" "ARDUINO_ARCH_RP2040" "ARDUINO_ARCH_MBED_RP2040"; do \
+	     if $(CXX) -std=$(STD) -fsyntax-only -I$(SRC) -D$$d $(SRC)/SharedBuffer.cpp 2>/dev/null; then \
+	         echo "FAIL platform: $$d was accepted"; exit 1; fi; \
+	     if ! $(CXX) -std=$(STD) -fsyntax-only -I$(SRC) -D$$d -include cs_hooks.h $(SRC)/SharedBuffer.cpp; then \
+	         echo "FAIL platform: $$d with the override macros was refused"; exit 1; fi; done
+	@echo "== platform (RP2040 and RP2350 stop the build unless the override macros are defined)"
+
 static_init_check: | $(OUT)
 	@$(CXX) -std=$(STD) -O1 $(WARN) -I$(SRC) -c $(SRC)/SharedBuffer.cpp -o $(OUT)/SharedBuffer.o
 	@if nm $(OUT)/SharedBuffer.o | grep -q "_GLOBAL__sub_I"; then \
@@ -87,4 +97,4 @@ version:
 clean:
 	rm -rf $(OUT)
 
-.PHONY: test version config_check static_init_check clean
+.PHONY: test version config_check platform_check static_init_check clean
