@@ -430,6 +430,76 @@ static void test_late_registration() {
     CHECK_EQ(sb.end(), SB::SB_OK);
 }
 
+// 1.0.1: a granted buffer is all 0; a failed acquire touches nothing
+static void test_zero_on_acquire() {
+    SB sb;
+    SB::Handle a = sb.registerBuffer("a", 1000);
+    SB::Handle b = sb.registerBuffer("b", 300);
+    CHECK_EQ(sb.begin(), SB::SB_OK);
+    const size_t pool = sb.poolSize();
+
+    uint8_t* pa = (uint8_t*) sb.acquire(a);
+    CHECK(pa != NULL);
+    size_t nonZero = 0;
+    for ( size_t i = 0; i < 1000; i++ ) if ( pa[i] != 0 ) nonZero++;
+    CHECK_EQ(nonZero, 0);
+    memset(pa, 0xA5, pool);                                 // dirty the whole pool
+
+    SB::Status st;
+    CHECK(sb.acquire(b, &st) == NULL);                      // a fills the pool
+    CHECK_EQ(st, SB::SB_ERR_NO_SPACE);
+    size_t changed = 0;
+    for ( size_t i = 0; i < pool; i++ ) if ( pa[i] != 0xA5 ) changed++;
+    CHECK_EQ(changed, 0);                                   // the failed acquire wrote nothing
+    CHECK_EQ(sb.release(a), SB::SB_OK);
+
+    uint8_t* pb = (uint8_t*) sb.acquire(b);                 // the same bytes as a, offset 0
+    CHECK(pb == pa);
+    nonZero = 0;
+    for ( size_t i = 0; i < 300; i++ ) if ( pb[i] != 0 ) nonZero++;
+    CHECK_EQ(nonZero, 0);
+    changed = 0;
+    for ( size_t i = al(300); i < pool; i++ ) if ( pb[i] != 0xA5 ) changed++;
+    CHECK_EQ(changed, 0);                                   // nothing past b's slot is written
+    CHECK_EQ(sb.release(b), SB::SB_OK);
+    CHECK_EQ(sb.end(), SB::SB_OK);
+}
+
+// 1.0.1: begin() clears the whole pool; a begin() refused at once touches nothing
+static void test_begin_clears() {
+    alignas(64) static uint8_t storage[512];
+    memset(storage, 0xEE, sizeof(storage));
+    SB sb;
+    SB::Handle a = sb.registerBuffer("a", 64);
+    CHECK_EQ(sb.begin(storage, sizeof(storage)), SB::SB_OK);
+    size_t nonZero = 0;
+    for ( size_t i = 0; i < sb.poolSize(); i++ ) if ( storage[i] != 0 ) nonZero++;
+    CHECK_EQ(nonZero, 0);
+
+    uint8_t* p = (uint8_t*) sb.acquire(a);
+    CHECK(p == storage);
+    memset(p, 0x77, 64);
+    CHECK_EQ(sb.begin(storage, sizeof(storage)), SB::SB_ERR_STARTED);
+    CHECK_EQ(sb.begin(), SB::SB_ERR_STARTED);
+    size_t changed = 0;
+    for ( size_t i = 0; i < 64; i++ ) if ( storage[i] != 0x77 ) changed++;
+    CHECK_EQ(changed, 0);                                   // the held buffer kept its data
+    CHECK_EQ(sb.release(a), SB::SB_OK);
+    CHECK_EQ(sb.end(), SB::SB_OK);
+
+    // Heap pool: the bytes past the first buffer were cleared by begin(), not by acquire()
+    SB heap;
+    SB::Handle small = heap.registerBuffer("small", 16);
+    CHECK_EQ(heap.begin(4096), SB::SB_OK);
+    uint8_t* q = (uint8_t*) heap.acquire(small);            // offset 0
+    CHECK(q != NULL);
+    nonZero = 0;
+    for ( size_t i = 0; i < heap.poolSize(); i++ ) if ( q[i] != 0 ) nonZero++;
+    CHECK_EQ(nonZero, 0);
+    CHECK_EQ(heap.release(small), SB::SB_OK);
+    CHECK_EQ(heap.end(), SB::SB_OK);
+}
+
 static void test_end() {
     SB sb;
     SB::Handle a = sb.registerBuffer("a", 64);
@@ -554,7 +624,7 @@ static void test_random() {
     uint8_t* base = NULL;
     bool held[N] = { false };
     size_t offset[N] = { 0 };
-    long acquired = 0, noSpace = 0, badData = 0, badPlace = 0, badStats = 0;
+    long acquired = 0, noSpace = 0, badData = 0, badPlace = 0, badStats = 0, badZero = 0;
 
     for ( int op = 0; op < 20000; op++ ) {
         int h = (int) rnd(N);
@@ -586,6 +656,7 @@ static void test_random() {
             if ( p == NULL ) { badPlace++; continue; }
             if ( base == NULL ) base = p - bestOff;
             if ( p != base + bestOff || (uintptr_t) p % A != 0 ) badPlace++;
+            for ( size_t i = 0; i < sizes[h]; i++ ) if ( p[i] != 0 ) { badZero++; break; }
             size_t off = (size_t) (p - base);
             for ( size_t i = 0; i < need && off + i < pool; i++ ) {
                 if ( owner[off + i] != -1 ) badPlace++;
@@ -607,6 +678,7 @@ static void test_random() {
     }
     CHECK_EQ(badData, 0);
     CHECK_EQ(badPlace, 0);
+    CHECK_EQ(badZero, 0);
     CHECK_EQ(badStats, 0);
     CHECK(acquired > 1000);
     CHECK(noSpace > 100);                                   // the pool was often full or fragmented
@@ -647,6 +719,7 @@ static void test_threads() {
                 uint8_t* p = (uint8_t*) sb.acquire(h);
                 if ( p == NULL ) { busy++; continue; }
                 if ( sb.pointer(h) != p || !sb.isHeld(h) ) corrupt++;
+                for ( size_t i = 0; i < len; i++ ) if ( p[i] != 0 ) { corrupt++; break; }
                 memset(p, 0x10 + t, len);
                 for ( size_t i = 0; i < len; i++ ) if ( p[i] != 0x10 + t ) { corrupt++; break; }
                 if ( sb.release(h) != SB::SB_OK ) corrupt++;
@@ -709,7 +782,7 @@ static void test_lock_per_call() {
     ENTERS(sb.dump(collectLine), 2);                        // the header, then one per buffer
     ENTERS(sb.release(0), 1);
     ENTERS(sb.end(), 1);
-    ENTERS(sb.begin(storage, sizeof(storage)), 1);
+    ENTERS(sb.begin(storage, sizeof(storage)), 2);         // before and after the clear
     ENTERS(sb.end(), 1);
     ENTERS(SB::statusText(SB::SB_ERR_HELD), 0);
 }
@@ -719,7 +792,9 @@ static int        g_raceResult = -100;
 alignas(64) static uint8_t g_raceStorage[4096];
 
 static void raceRegisterLarger() { g_raceResult = g_raceTarget->registerBuffer("big", 4000); }
+static void raceRegisterHuge()   { g_raceResult = g_raceTarget->registerBuffer("huge", 8000); }
 static void raceBeginStorage()   { g_raceResult = g_raceTarget->begin(g_raceStorage, sizeof(g_raceStorage)); }
+static void raceBeginHeap()      { g_raceResult = g_raceTarget->begin(); }
 
 // Another task acts between the two critical sections of begin(size_t)
 static void test_begin_race() {
@@ -745,6 +820,21 @@ static void test_begin_race() {
     CHECK_EQ(sb.poolSize(), sizeof(g_raceStorage));        // the winner's pool stays
     CHECK(sb.acquire(1) == g_raceStorage);
     CHECK_EQ(sb.release(1), SB::SB_OK);
+    CHECK_EQ(sb.end(), SB::SB_OK);
+
+    // The same two races between the two critical sections of begin(storage)
+    g_inject = raceRegisterHuge;
+    g_injectAt = g_enters + 1;
+    CHECK_EQ(sb.begin(g_raceStorage, sizeof(g_raceStorage)), SB::SB_ERR_TOO_LARGE);
+    CHECK_EQ(g_raceResult, 2);
+    CHECK(!sb.started());
+
+    g_inject = raceBeginHeap;
+    g_injectAt = g_enters + 1;
+    alignas(64) static uint8_t other[8192];
+    CHECK_EQ(sb.begin(other, sizeof(other)), SB::SB_ERR_STARTED);
+    CHECK_EQ(g_raceResult, SB::SB_OK);
+    CHECK_EQ(sb.poolSize(), al(8000));                     // the heap pool won
     CHECK_EQ(sb.end(), SB::SB_OK);
     g_inject = NULL;
 }
@@ -777,6 +867,8 @@ int main() {
     test_best_fit();
     test_fragmentation();
     test_late_registration();
+    test_zero_on_acquire();
+    test_begin_clears();
     test_end();
     test_dump();
     test_status_text();

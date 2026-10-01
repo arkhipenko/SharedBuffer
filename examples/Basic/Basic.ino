@@ -3,7 +3,8 @@
 // "rx" needs 256 bytes and "work" needs 512. The pool is the largest of them,
 // 512 bytes. While "rx" is held, "work" does not fit and acquire() fails with
 // "no space". After "rx" is released, "work" gets the whole pool. At the end the
-// pool is made again with room for both buffers at once.
+// pool is made again with room for both buffers at once. Every granted buffer is
+// cleared to 0, even where the previous user left data.
 
 #include <SharedBuffer.h>
 
@@ -18,6 +19,13 @@ void report(const char* what, int status) {
   Serial.print(what);
   Serial.print(": ");
   Serial.println(SharedBuffer::statusText(status));
+}
+
+bool allZero(const uint8_t* p, size_t n) {
+  for ( size_t i = 0; i < n; i++ ) {
+    if ( p[i] != 0 ) return false;
+  }
+  return true;
 }
 
 void setup() {
@@ -43,11 +51,12 @@ void setup() {
   Serial.print("pool bytes: ");
   Serial.println((unsigned long) SharedBuf.poolSize());      // 512
 
-  // 3. Take "rx" and use it
+  // 3. Take "rx". It comes cleared to 0.
   uint8_t* rx = (uint8_t*) SharedBuf.acquire(rxBuffer, &status);
   report("acquire rx", status);                              // ok
   if ( rx == NULL ) return;
-  memset(rx, 0, SharedBuf.size(rxBuffer));
+  Serial.print("rx is all 0: ");
+  Serial.println((unsigned long) allZero(rx, SharedBuf.size(rxBuffer)));   // 1
 
   // "work" needs 512 bytes, and "rx" holds 256 of them
   if ( SharedBuf.acquire(workBuffer, &status) == NULL ) {
@@ -66,6 +75,14 @@ void setup() {
   Serial.println((unsigned long) work[511]);                 // 255
   report("release work", SharedBuf.release(workBuffer));     // ok
   report("release work again", SharedBuf.release(workBuffer));  // not held
+
+  // "work" left 0, 1, 2 ... in the pool. "rx" gets the same bytes, cleared to 0.
+  rx = (uint8_t*) SharedBuf.acquire(rxBuffer, &status);
+  report("acquire rx again", status);                        // ok
+  if ( rx == NULL ) return;
+  Serial.print("rx is all 0 after work used the bytes: ");
+  Serial.println((unsigned long) allZero(rx, SharedBuf.size(rxBuffer)));   // 1
+  report("release rx", SharedBuf.release(rxBuffer));         // ok
 
   // 5. Both buffers at the same time need a pool of 256 + 512 bytes.
   //    end() frees the pool; the registrations stay.

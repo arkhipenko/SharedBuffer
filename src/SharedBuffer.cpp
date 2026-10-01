@@ -139,6 +139,8 @@ SharedBuffer::Status SharedBuffer::begin(size_t minPoolSize) {
     // size is at most SIZE_MAX - (ALIGN - 1), so the sum does not overflow.
     void* raw = malloc(size + (SHARED_BUFFER_ALIGN - 1));
     if ( raw == NULL ) return SB_ERR_NO_MEMORY;
+    uint8_t* pool = (uint8_t*) raw + alignSkip(raw);
+    memset(pool, 0, size);                      // the pool is not visible to other calls yet
 
     Status result = SB_OK;
     {
@@ -151,7 +153,7 @@ SharedBuffer::Status SharedBuffer::begin(size_t minPoolSize) {
         }
         else {
             m_raw      = raw;
-            m_pool     = (uint8_t*) raw + alignSkip(raw);
+            m_pool     = pool;
             m_poolSize = size;
         }
     }
@@ -166,11 +168,19 @@ SharedBuffer::Status SharedBuffer::begin(void* storage, size_t storageSize) {
     size_t size = (storageSize - skip) & ~((size_t) (SHARED_BUFFER_ALIGN - 1));
     if ( size == 0 ) return SB_ERR_ARGUMENT;
 
+    {
+        Critical cs;
+        if ( m_pool != NULL ) return SB_ERR_STARTED;    // do not touch memory of a running pool
+        if ( m_largest > size ) return SB_ERR_TOO_LARGE;
+    }
+    uint8_t* pool = (uint8_t*) storage + skip;
+    memset(pool, 0, size);                              // outside the critical section: not visible yet
+
     Critical cs;
-    if ( m_pool != NULL ) return SB_ERR_STARTED;
-    if ( m_largest > size ) return SB_ERR_TOO_LARGE;
+    if ( m_pool != NULL ) return SB_ERR_STARTED;        // another task called begin() meanwhile
+    if ( m_largest > size ) return SB_ERR_TOO_LARGE;    // a larger buffer was registered meanwhile
     m_raw      = NULL;
-    m_pool     = (uint8_t*) storage + skip;
+    m_pool     = pool;
     m_poolSize = size;
     return SB_OK;
 }
@@ -193,6 +203,7 @@ SharedBuffer::Status SharedBuffer::end() {
 void* SharedBuffer::acquire(Handle handle, Status* status) {
     Status result;
     void*  p = NULL;
+    size_t clear = 0;
     {
         Critical cs;
         if ( !valid(handle) )                 result = SB_ERR_ARGUMENT;
@@ -229,10 +240,14 @@ void* SharedBuffer::acquire(Handle handle, Status* status) {
                 m_entries[handle].offset = bestOff;
                 m_entries[handle].held   = true;
                 p = m_pool + bestOff;
+                clear = m_entries[handle].size;
                 result = SB_OK;
             }
         }
     }
+    // The bytes are reserved for this handle now, so they are cleared outside the
+    // critical section: interrupts stay on during the memset.
+    if ( p != NULL ) memset(p, 0, clear);
     if ( status != NULL ) *status = result;
     return p;
 }

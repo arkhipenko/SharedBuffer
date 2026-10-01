@@ -4,9 +4,9 @@
 #include <stddef.h>
 
 /** @brief Library version as a number: major * 10000 + minor * 100 + patch */
-#define SHARED_BUFFER_VERSION           10000
+#define SHARED_BUFFER_VERSION           10001
 /** @brief Library version as a string */
-#define SHARED_BUFFER_VERSION_STRING    "1.0.0"
+#define SHARED_BUFFER_VERSION_STRING    "1.0.1"
 
 // The two settings below may be set by the build, e.g. -D SHARED_BUFFER_MAX_BUFFERS=16.
 // Every file of one firmware must see the same values.
@@ -37,13 +37,13 @@
  *
  * Each user registers a named buffer and its size once and receives a handle.
  * begin() allocates the pool once: the largest registered size, or more when asked.
- * acquire() places the buffer in the smallest free gap of the pool that fits it and
- * marks those bytes as held until release(). A request that no free gap can hold
- * fails with SB_ERR_NO_SPACE. The pool is never resized and nothing is allocated
- * after begin().
+ * begin() clears the pool to 0. acquire() places the buffer in the smallest free gap
+ * of the pool that fits it, clears the buffer to 0, and marks those bytes as held until
+ * release(). A request that no free gap can hold fails with SB_ERR_NO_SPACE. The pool
+ * is never resized and nothing is allocated after begin().
  *
- * All calls may be made from several tasks and from interrupts, except begin() and
- * end(), which call malloc() and free().
+ * All calls may be made from several tasks and from interrupts, except begin(), end()
+ * and dump(). begin() and end() call malloc() and free().
  */
 class SharedBuffer {
     public:
@@ -100,7 +100,7 @@ class SharedBuffer {
          *        this and the largest registered buffer (both rounded to SHARED_BUFFER_ALIGN).
          * @return SB_OK, SB_ERR_STARTED, SB_ERR_ARGUMENT (nothing registered and
          *         minPoolSize 0), SB_ERR_TOO_LARGE, SB_ERR_NO_MEMORY
-         * @note Calls malloc(): not from an interrupt.
+         * @note The whole pool is cleared to 0. Calls malloc(): not from an interrupt.
          */
         Status begin(size_t minPoolSize = 0);
 
@@ -109,7 +109,8 @@ class SharedBuffer {
          * @param storage Memory that outlives the pool, for example a static array.
          *        Declare it alignas(SHARED_BUFFER_ALIGN), or up to SHARED_BUFFER_ALIGN - 1
          *        bytes at its start are skipped.
-         * @param storageSize Size of storage, bytes. All of it (after alignment) becomes the pool.
+         * @param storageSize Size of storage, bytes. All of it (after alignment) becomes the
+         *        pool and is cleared to 0.
          * @return SB_OK, SB_ERR_STARTED, SB_ERR_ARGUMENT (NULL storage, or less than
          *         SHARED_BUFFER_ALIGN bytes left after alignment), SB_ERR_TOO_LARGE (a
          *         registered buffer does not fit)
@@ -128,9 +129,10 @@ class SharedBuffer {
          * @param handle Handle from registerBuffer()
          * @param status Optional: receives SB_OK, SB_ERR_ARGUMENT, SB_ERR_NOT_STARTED,
          *        SB_ERR_HELD or SB_ERR_NO_SPACE
-         * @return Pointer to size(handle) bytes aligned to SHARED_BUFFER_ALIGN, or NULL
-         * @note Never waits. The memory is not cleared: it holds whatever the previous
-         *       user of those bytes left.
+         * @return Pointer to size(handle) bytes aligned to SHARED_BUFFER_ALIGN, all 0, or NULL
+         * @note Never waits for another user. The buffer is cleared after the critical
+         *       section, so the call takes time in proportion to size(handle). A failed
+         *       call touches no memory.
          */
         void* acquire(Handle handle, Status* status = NULL);
 

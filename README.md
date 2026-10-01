@@ -1,6 +1,6 @@
 # SharedBuffer
 
-Version: 1.0.0
+Version: 1.0.1
 
 One memory pool, allocated once, shared by buffers that are not used at the same time.
 
@@ -8,7 +8,7 @@ One memory pool, allocated once, shared by buffers that are not used at the same
 
 Many firmwares hold large buffers that are never used together. A firmware update (DFU) may need two 4 KB buffers and runs only during an update. A calculation may need a 16 KB buffer and runs only in normal operation. Separate buffers take 24 KB of RAM. With SharedBuffer they take 16 KB.
 
-Each user registers a named buffer and its size once and receives a handle. `begin()` allocates the pool once, from the heap or from a static array. The pool is as large as the largest registered buffer, or larger when asked. `acquire()` places the buffer in a free gap of the pool and holds those bytes until `release()`. When no free gap fits, `acquire()` fails at once with a status code and never waits. Nothing is allocated after `begin()`.
+Each user registers a named buffer and its size once and receives a handle. `begin()` allocates the pool once, from the heap or from a static array. The pool is as large as the largest registered buffer, or larger when asked. `acquire()` places the buffer in a free gap of the pool, clears it to 0, and holds those bytes until `release()`. When no free gap fits, `acquire()` fails at once with a status code and never waits. Nothing is allocated after `begin()`.
 
 ## Features
 
@@ -18,6 +18,7 @@ Each user registers a named buffer and its size once and receives a handle. `beg
 - Registration after `begin()` is accepted when the buffer fits the pool.
 - Placement at `acquire()`: the smallest free gap that fits (best fit), the lowest offset on a tie. Buffers are aligned to `SHARED_BUFFER_ALIGN`.
 - Exclusive use: a held buffer cannot be acquired again, and its bytes are not given to another buffer until `release()`.
+- Zeroed memory: `begin()` clears the pool, and every granted buffer is cleared to 0. No data passes from one user to the next.
 - Built-in critical section: calls may come from several tasks and from interrupts (see Thread and interrupt safety).
 - Status codes for every failure, `statusText()` for printing them, and `dump()` for the pool state.
 - No dependency on the Arduino API. Plain C++11.
@@ -43,7 +44,7 @@ Each user registers a named buffer and its size once and receives a handle. `beg
 - PlatformIO: add it to `platformio.ini`:
 
 ```ini
-lib_deps = https://github.com/arkhipenko/SharedBuffer.git#v1.0.0
+lib_deps = https://github.com/arkhipenko/SharedBuffer.git#v1.0.1
 ```
 
 The library is not published in the Arduino Library Manager or the PlatformIO registry.
@@ -119,7 +120,7 @@ Guarantees and limits:
 - Every registered buffer can be acquired when no other buffer is held. The pool is never smaller than the largest registration.
 - Several buffers held at once need a pool of at least the total of their sizes, each rounded up to `SHARED_BUFFER_ALIGN`. With alignment 8, two 300-byte buffers need 608 bytes, not 600. Pass that total to `begin(minPoolSize)`, or to `begin(storage, size)` as the array size.
 - *** IMPORTANT *** The free space can be split into gaps. `acquire()` can then fail with `SB_ERR_NO_SPACE` although `freeBytes()` is large enough. `largestFree()` is the largest buffer that fits now. A feature that needs several buffers should acquire all of them when it starts and release all of them when it stops (see DfuAndCalc).
-- The memory is not cleared. A buffer holds whatever the previous user of those bytes left.
+- `begin()` clears the whole pool to 0. A successful `acquire()` clears the buffer's `size(h)` bytes to 0. A failed `acquire()`, and a `begin()` refused with `SB_ERR_STARTED` at the start, touch no memory.
 - The pointer from `acquire()` must not be used after `release()`.
 
 ## Thread and interrupt safety
@@ -137,7 +138,9 @@ Every call reads and changes the registration table inside a short critical sect
 - `begin()` and `end()` call `malloc()` and `free()`, so they must not be called from an interrupt. Call `begin()` once, before other tasks use the pool.
 - `dump()` calls `snprintf()` and the writer. Do not call it from an interrupt.
 - ESP32: the library code is in flash. An interrupt handler registered with `ESP_INTR_FLAG_IRAM` runs while the flash cache is off (for example during a flash write in an OTA update), so it must not call the library. Handlers attached with `attachInterrupt()` are not IRAM handlers on arduino-esp32 3.3.9 by default.
-- `acquire()` never waits. A task that must wait retries later.
+- `acquire()` never waits for another user. A task that must wait retries later.
+- `acquire()` clears the buffer after its critical section, so interrupts stay on during the clear. The call takes time in proportion to the buffer size; in an interrupt, prefer small buffers.
+- `begin(storage, size)` clears the storage outside the critical section and then checks the state again, as `begin(size_t)` does after `malloc()`.
 - The `dump()` writer runs outside the critical section.
 
 ## API
@@ -153,10 +156,10 @@ Every call reads and changes the registration table inside a short critical sect
 | Call | Returns | Notes |
 |---|---|---|
 | `Handle registerBuffer(const char* name, size_t size)` | handle, or `SB_ERR_ARGUMENT`, `SB_ERR_DUPLICATE`, `SB_ERR_FULL`, `SB_ERR_TOO_LARGE` | The name pointer is stored, not copied: use a string literal. Names are compared by content. After `begin()` the size must fit the pool. Registration cannot be undone. |
-| `Status begin(size_t minPoolSize = 0)` | `SB_OK`, `SB_ERR_STARTED`, `SB_ERR_ARGUMENT`, `SB_ERR_TOO_LARGE`, `SB_ERR_NO_MEMORY` | Pool = max(largest registration, `minPoolSize`), both rounded to the alignment. One `malloc()` of the pool size plus `SHARED_BUFFER_ALIGN - 1` bytes. `SB_ERR_ARGUMENT` when nothing is registered and `minPoolSize` is 0. |
-| `Status begin(void* storage, size_t storageSize)` | `SB_OK`, `SB_ERR_STARTED`, `SB_ERR_ARGUMENT`, `SB_ERR_TOO_LARGE` | The whole array becomes the pool (rounded down to the alignment). Declare it `alignas(SHARED_BUFFER_ALIGN)`, or up to `SHARED_BUFFER_ALIGN - 1` bytes at its start are skipped. `SB_ERR_ARGUMENT` for NULL storage or less than `SHARED_BUFFER_ALIGN` bytes left after alignment. `SB_ERR_TOO_LARGE` when a registered buffer does not fit. |
+| `Status begin(size_t minPoolSize = 0)` | `SB_OK`, `SB_ERR_STARTED`, `SB_ERR_ARGUMENT`, `SB_ERR_TOO_LARGE`, `SB_ERR_NO_MEMORY` | Pool = max(largest registration, `minPoolSize`), both rounded to the alignment. One `malloc()` of the pool size plus `SHARED_BUFFER_ALIGN - 1` bytes. `SB_ERR_ARGUMENT` when nothing is registered and `minPoolSize` is 0. The pool is cleared to 0. |
+| `Status begin(void* storage, size_t storageSize)` | `SB_OK`, `SB_ERR_STARTED`, `SB_ERR_ARGUMENT`, `SB_ERR_TOO_LARGE` | The whole array becomes the pool (rounded down to the alignment). Declare it `alignas(SHARED_BUFFER_ALIGN)`, or up to `SHARED_BUFFER_ALIGN - 1` bytes at its start are skipped. `SB_ERR_ARGUMENT` for NULL storage or less than `SHARED_BUFFER_ALIGN` bytes left after alignment. `SB_ERR_TOO_LARGE` when a registered buffer does not fit. The pool area of the storage is cleared to 0. |
 | `Status end()` | `SB_OK`, `SB_ERR_NOT_STARTED`, `SB_ERR_HELD` | Frees heap memory from `begin(size_t)`. Registrations stay, and `begin()` may be called again. |
-| `void* acquire(Handle h, Status* status = NULL)` | pointer, or NULL | `*status`: `SB_OK`, `SB_ERR_ARGUMENT`, `SB_ERR_NOT_STARTED`, `SB_ERR_HELD`, `SB_ERR_NO_SPACE`. The pointer is aligned to `SHARED_BUFFER_ALIGN`, and `size(h)` bytes are usable. |
+| `void* acquire(Handle h, Status* status = NULL)` | pointer, or NULL | `*status`: `SB_OK`, `SB_ERR_ARGUMENT`, `SB_ERR_NOT_STARTED`, `SB_ERR_HELD`, `SB_ERR_NO_SPACE`. The pointer is aligned to `SHARED_BUFFER_ALIGN`, and `size(h)` bytes are usable and 0. |
 | `Status release(Handle h)` | `SB_OK`, `SB_ERR_ARGUMENT`, `SB_ERR_NOT_HELD` | |
 | `void* pointer(Handle h) const` | pointer, or NULL | The pointer of a held buffer. NULL when not held. |
 | `bool isHeld(Handle h) const` | | |
@@ -205,16 +208,23 @@ Set them in the build, for example `build_flags = -D SHARED_BUFFER_MAX_BUFFERS=1
 | `SHARED_BUFFER_MAX_BUFFERS` | 8 | Registrations per object, 1 to 127. |
 | `SHARED_BUFFER_ALIGN` | 8 (AVR: 1) | Alignment of every buffer and rounding of every size, a power of two. |
 | `SHARED_BUFFER_CRITICAL_ENTER()`, `SHARED_BUFFER_CRITICAL_EXIT()` | built in | Define both to replace the built-in critical section. They must exclude every other caller (other cores included) and order memory accesses on the hardware. The library adds a compiler barrier after ENTER and before EXIT (GCC and clang) and never nests them. They are seen only by `SharedBuffer.cpp`. |
-| `SHARED_BUFFER_VERSION`, `SHARED_BUFFER_VERSION_STRING` | 10000, "1.0.0" | Library version (major * 10000 + minor * 100 + patch). |
+| `SHARED_BUFFER_VERSION`, `SHARED_BUFFER_VERSION_STRING` | 10001, "1.0.1" | Library version (major * 10000 + minor * 100 + patch). |
 
 ## Costs
 
 - RAM per object: per registration a name pointer, two sizes, a flag and one byte of order, plus 6 fields. With the default 8 registrations `sizeof(SharedBuffer)` is 74 bytes on AVR, 156 bytes on 32-bit ARM and 304 bytes on a 64-bit host (measured with avr-gcc, arm-none-eabi-gcc 10.3 and g++ 13).
 - Pool: the pool size, plus up to `SHARED_BUFFER_ALIGN - 1` bytes from `begin(size_t)`, plus the heap chunk header.
+- Time: `begin()` clears the pool once, and `acquire()` clears `size(h)` bytes (`memset()`) on every successful call.
 - Arduino Uno, measured with PlatformIO (atmelavr 5.1.0): register, begin, acquire and release take 86 bytes of RAM and about 1.35 KB of flash including `malloc()`. `statusText()` adds 144 bytes of RAM, and `dump()` adds 208 bytes of RAM and about 2.2 KB of flash (`snprintf()`), because AVR keeps string literals in RAM. Unused calls are removed by the linker.
+
+## Upgrading to 1.0.1
+
+- `acquire()` now returns a buffer cleared to 0, and `begin()` clears the pool. 1.0.0 left the previous user's data in place. Code that cleared a buffer after `acquire()` still works and may drop that step. Code that expected data to survive from one `acquire()` to the next was relying on unspecified behavior and must keep its data elsewhere.
+- `acquire()` takes longer for a large buffer (the clear). No call, type or status code changed.
 
 ## Version history
 
+- 1.0.1 (2026-10-01): `acquire()` clears the granted buffer to 0, and `begin()` clears the pool.
 - 1.0.0 (2026-09-30): first release.
 
 ## Author
